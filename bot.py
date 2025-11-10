@@ -18,14 +18,14 @@ import aiofiles
 import aiofiles.os as async_os
 
 
-import os
+# --- Load environment first ---
+load_dotenv()
 
 print("API_ID env:", os.getenv("API_ID"))
 print("API_HASH env length:", len(os.getenv("API_HASH") or ""))
 print("BOT_TOKEN starts with:", (os.getenv("BOT_TOKEN") or "")[:10])
 
-# --- Load Config ---
-load_dotenv()
+# --- Config ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -49,10 +49,12 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 shutdown_requested = False
 ACTIVE_TASKS = set()
 
+
 def handle_shutdown():
     global shutdown_requested
     shutdown_requested = True
     logging.info("Shutdown requested. Waiting for ongoing wallpaper posts to complete...")
+
 
 # --- Load & Save JSON ---
 async def load_data():
@@ -64,9 +66,21 @@ async def load_data():
             return []
         return json.loads(content)
 
+
 async def save_data(data):
+    """Save data safely, converting datetime and Telethon objects to serializable forms."""
+    def default_serializer(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        try:
+            return str(obj)
+        except Exception:
+            return None
+
     async with aiofiles.open(DATA_FILE, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        serialized = json.dumps(data, ensure_ascii=False, indent=2, default=default_serializer)
+        await f.write(serialized)
+
 
 # --- Hashing ---
 def calculate_hashes(filepath):
@@ -81,6 +95,7 @@ def calculate_hashes(filepath):
     except Exception as e:
         logging.error(f"Error calculating hashes for {filepath}: {e}")
         return None, None
+
 
 async def check_image_hashes_in_data(data, sha256, p_hash):
     max_diff = 64
@@ -111,6 +126,7 @@ async def check_image_hashes_in_data(data, sha256, p_hash):
                 continue
     return "proceed", None
 
+
 # --- Update JSON entry ---
 async def update_wallpaper_status(data, jpg_url, status, reasons=None, sha256=None, phash=None, tg_response=None):
     for item in data:
@@ -127,6 +143,7 @@ async def update_wallpaper_status(data, jpg_url, status, reasons=None, sha256=No
             break
     await save_data(data)
 
+
 # --- Download Image ---
 async def download_image(url, filename):
     try:
@@ -140,10 +157,12 @@ async def download_image(url, filename):
         logging.warning(f"Download failed for {url}: {e}")
         return None
 
+
 # --- Fetch Random Wallpaper ---
 async def get_random_wallpaper(data, categories):
     pending = [w for w in data if w.get("status", "pending") == "pending" and w["category"] in categories]
     return random.choice(pending) if pending else None
+
 
 # --- Send Wallpaper to Group ---
 async def send_wallpaper_to_group(client, data, config):
@@ -203,6 +222,7 @@ async def send_wallpaper_to_group(client, data, config):
                 await async_os.remove(path)
     finally:
         ACTIVE_TASKS.discard(task)
+
 
 # --- Main ---
 async def main():
