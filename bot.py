@@ -17,6 +17,13 @@ import signal
 import aiofiles
 import aiofiles.os as async_os
 
+
+import os
+
+print("API_ID env:", os.getenv("API_ID"))
+print("API_HASH env length:", len(os.getenv("API_HASH") or ""))
+print("BOT_TOKEN starts with:", (os.getenv("BOT_TOKEN") or "")[:10])
+
 # --- Load Config ---
 load_dotenv()
 API_ID = int(os.getenv("API_ID"))
