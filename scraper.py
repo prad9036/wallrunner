@@ -1,12 +1,17 @@
-# scraper.py
 import requests
 from bs4 import BeautifulSoup
 import json
 import re
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://4kwallpapers.com"
 DATA_FILE = "wallpapers.json"
+MAX_PAGE_WORKERS = 50     # how many pages scraped concurrently
+MAX_DETAIL_WORKERS = 100   # how many wallpapers per page scraped concurrently
+
+session = requests.Session()
+session.headers["User-Agent"] = "Mozilla/5.0 (GitHub Actions bot)"
 
 
 def sanitize_tags(raw_tags):
@@ -22,8 +27,11 @@ def sanitize_tags(raw_tags):
 
 def get_highest_image(url):
     """Fetch wallpaper page and return highest resolution JPG or PNG URL."""
-    html = requests.get(url).text
-    # look for both .jpg/.jpeg and .png
+    try:
+        html = session.get(url, timeout=10).text
+    except Exception:
+        return None
+
     matches = re.findall(r'/images/wallpapers/[^"]+\.(?:jpe?g|png)', html, re.IGNORECASE)
     if not matches:
         return None
@@ -60,57 +68,90 @@ def already_in_data(data, wallpaper_url, image_url):
     return False
 
 
-def scrape_page(data, page_url, consecutive_skips):
-    html = requests.get(page_url).text
-    soup = BeautifulSoup(html, "html.parser")
-    links = [a["href"] for a in soup.select("a.wallpapers__canvas_image")]
-
-    for href in links:
-        wallpaper_url = href if href.startswith("http") else BASE_URL + href
-        category = wallpaper_url.split("/")[3]
-
-        html2 = requests.get(wallpaper_url).text
+def fetch_wallpaper_details(href):
+    """Fetch metadata for a single wallpaper page."""
+    wallpaper_url = href if href.startswith("http") else BASE_URL + href
+    category = wallpaper_url.split("/")[3]
+    try:
+        html2 = session.get(wallpaper_url, timeout=10).text
         soup2 = BeautifulSoup(html2, "html.parser")
         meta = soup2.find("meta", {"name": "keywords"})
         tags = sanitize_tags(meta["content"]) if meta else []
-
         image_url = get_highest_image(wallpaper_url)
         if not image_url:
-            continue
-
-        if already_in_data(data, wallpaper_url, image_url):
-            consecutive_skips += 1
-            if consecutive_skips >= 50:
-                print("50 consecutive matches found. Terminating.")
-                return consecutive_skips, False
-            continue
-
-        consecutive_skips = 0
-        item = {
+            return None
+        return {
             "category": category,
             "wallpaper_url": wallpaper_url,
             "image_url": image_url,
             "tags": tags,
         }
-        data.append(item)
-        print(f"Added: {wallpaper_url}")
+    except Exception as e:
+        print(f"[ERROR] {wallpaper_url}: {e}")
+        return None
 
-    return consecutive_skips, True
+
+def scrape_page(page_num, existing_data):
+    """Scrape a single listing page and return a list of new wallpapers."""
+    url = BASE_URL if page_num == 1 else f"{BASE_URL}/?page={page_num}"
+    print(f"=== Scraping {url} ===")
+    try:
+        html = session.get(url, timeout=10).text
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch page {url}: {e}")
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    links = [a["href"] for a in soup.select("a.wallpapers__canvas_image")]
+
+    new_items = []
+    with ThreadPoolExecutor(max_workers=MAX_DETAIL_WORKERS) as executor:
+        futures = [executor.submit(fetch_wallpaper_details, href) for href in links]
+        for future in as_completed(futures):
+            result = future.result()
+            if not result:
+                continue
+            if already_in_data(existing_data, result["wallpaper_url"], result["image_url"]):
+                continue
+            new_items.append(result)
+            print(f"Added: {result['wallpaper_url']}")
+    return new_items
 
 
 def main():
     data = load_data()
     page = 1
+    total_new = 0
     consecutive_skips = 0
 
     while True:
-        url = BASE_URL if page == 1 else f"{BASE_URL}/?page={page}"
-        print(f"\n=== Scraping {url} ===")
-        consecutive_skips, keep_going = scrape_page(data, url, consecutive_skips)
-        save_data(data)
-        if not keep_going:
-            break
-        page += 1
+        # process 10 pages concurrently
+        page_batch = [page + i for i in range(MAX_PAGE_WORKERS)]
+        print(f"\n>>> Processing pages {page}–{page + MAX_PAGE_WORKERS - 1}")
+
+        all_new = []
+        with ThreadPoolExecutor(max_workers=MAX_PAGE_WORKERS) as executor:
+            futures = {executor.submit(scrape_page, p, data): p for p in page_batch}
+            for future in as_completed(futures):
+                new_items = future.result()
+                if new_items:
+                    all_new.extend(new_items)
+
+        if not all_new:
+            consecutive_skips += 1
+            if consecutive_skips >= 3:
+                print("No new wallpapers after several batches. Stopping.")
+                break
+        else:
+            consecutive_skips = 0
+            total_new += len(all_new)
+            data.extend(all_new)
+            save_data(data)
+            print(f"Saved {len(all_new)} new wallpapers.")
+
+        page += MAX_PAGE_WORKERS
+
+    print(f"\n=== Done! Total new wallpapers: {total_new} ===")
 
 
 if __name__ == "__main__":
