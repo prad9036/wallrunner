@@ -10,15 +10,13 @@ from urllib.parse import urlparse
 import hashlib
 from PIL import Image
 import imagehash
-import base64
 from datetime import datetime
 from dotenv import load_dotenv
 import signal
 import aiofiles
 import aiofiles.os as async_os
 
-
-# --- Load environment first ---
+# --- Load environment ---
 load_dotenv()
 
 print("API_ID env:", os.getenv("API_ID"))
@@ -181,7 +179,7 @@ async def send_wallpaper_to_group(client, data, config):
             return
 
         jpg_url = wallpaper["image_url"]
-        tags = wallpaper["tags"]
+        tags = wallpaper.get("tags") or []
         caption = " ".join([f"#{t.replace(' ', '')}" for t in tags]) if tags else "#wallpaper"
         category = wallpaper.get("category", "wallpaper")
         filename = f"{category}_{random.randint(1000,9999)}_{os.path.basename(urlparse(jpg_url).path)}"
@@ -240,6 +238,7 @@ async def main():
 
     scheduler = AsyncIOScheduler()
     for group_name, config in BOT_GROUPS.items():
+        # Schedule interval jobs
         scheduler.add_job(
             send_wallpaper_to_group,
             'interval',
@@ -250,9 +249,15 @@ async def main():
             coalesce=True,
             misfire_grace_time=60
         )
+
     scheduler.start()
     logging.info("Wallpaper bot started (JSON mode).")
 
+    # --- Run first batch immediately for all groups ---
+    initial_tasks = [send_wallpaper_to_group(client, data, config) for config in BOT_GROUPS.values()]
+    await asyncio.gather(*initial_tasks)
+
+    # --- Keep alive for scheduler ---
     while not shutdown_requested:
         await asyncio.sleep(1)
 
