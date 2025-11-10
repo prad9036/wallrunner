@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://4kwallpapers.com"
 DATA_FILE = "wallpapers.json"
-MAX_PAGE_WORKERS = 50     # how many pages scraped concurrently
+MAX_PAGE_WORKERS = 5   # how many pages scraped concurrently
 MAX_DETAIL_WORKERS = 100   # how many wallpapers per page scraped concurrently
 
 session = requests.Session()

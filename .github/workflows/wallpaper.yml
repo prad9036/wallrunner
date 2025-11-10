@@ -1,0 +1,56 @@
+name: Wallpaper Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"  # fallback safety trigger every 12h (if auto scheduler fails)
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # stop runaway jobs after 6h
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjpeg-dev zlib1g-dev
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install telethon apscheduler httpx aiofiles imagehash pillow python-dotenv
+
+      - name: Run wallpaper bot batch
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python bot.py
+
+      - name: Commit & push updated wallpapers.json
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add wallpapers.json || true
+          git commit -m "Auto-update wallpapers.json after batch [skip ci]" || echo "No changes to commit"
+          git push
+
+      - name: Determine next run & schedule new workflow
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python auto_schedule.py
