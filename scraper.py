@@ -4,14 +4,26 @@ import json
 import re
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pymongo import MongoClient, errors
 
 BASE_URL = "https://4kwallpapers.com"
-DATA_FILE = "wallpapers.json"
-MAX_PAGE_WORKERS = 5   # how many pages scraped concurrently
-MAX_DETAIL_WORKERS = 100   # how many wallpapers per page scraped concurrently
+DB_NAME = "prdp"
+COLLECTION_NAME = "wallpapers"
+MAX_PAGE_WORKERS = 5
+MAX_DETAIL_WORKERS = 100
 
 session = requests.Session()
-session.headers["User-Agent"] = "Mozilla/5.0 (GitHub Actions bot)"
+session.headers["User-Agent"] = "Mozilla/5.0 (Mongo Scraper bot)"
+
+# --- Mongo setup ---
+MONGO_URI = os.getenv("FIREBASE_MONGO_URI", "mongodb://localhost:27017")
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
+
+# Ensure unique entries
+collection.create_index("image_url", unique=True)
+collection.create_index("wallpaper_url", unique=True)
 
 
 def sanitize_tags(raw_tags):
@@ -49,27 +61,16 @@ def get_highest_image(url):
     return best
 
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return []
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def already_in_data(data, wallpaper_url, image_url):
-    for item in data:
-        if item["wallpaper_url"] == wallpaper_url or item["image_url"] == image_url:
-            return True
-    return False
+def already_in_db(wallpaper_url, image_url):
+    return collection.find_one({
+        "$or": [
+            {"wallpaper_url": wallpaper_url},
+            {"image_url": image_url}
+        ]
+    }) is not None
 
 
 def fetch_wallpaper_details(href):
-    """Fetch metadata for a single wallpaper page."""
     wallpaper_url = href if href.startswith("http") else BASE_URL + href
     category = wallpaper_url.split("/")[3]
     try:
@@ -91,8 +92,7 @@ def fetch_wallpaper_details(href):
         return None
 
 
-def scrape_page(page_num, existing_data):
-    """Scrape a single listing page and return a list of new wallpapers."""
+def scrape_page(page_num):
     url = BASE_URL if page_num == 1 else f"{BASE_URL}/?page={page_num}"
     print(f"=== Scraping {url} ===")
     try:
@@ -111,27 +111,29 @@ def scrape_page(page_num, existing_data):
             result = future.result()
             if not result:
                 continue
-            if already_in_data(existing_data, result["wallpaper_url"], result["image_url"]):
+            if already_in_db(result["wallpaper_url"], result["image_url"]):
                 continue
-            new_items.append(result)
-            print(f"Added: {result['wallpaper_url']}")
+            try:
+                collection.insert_one(result)
+                new_items.append(result)
+                print(f"Inserted: {result['wallpaper_url']}")
+            except errors.DuplicateKeyError:
+                pass
     return new_items
 
 
 def main():
-    data = load_data()
     page = 1
     total_new = 0
     consecutive_skips = 0
 
     while True:
-        # process 10 pages concurrently
         page_batch = [page + i for i in range(MAX_PAGE_WORKERS)]
         print(f"\n>>> Processing pages {page}–{page + MAX_PAGE_WORKERS - 1}")
 
         all_new = []
         with ThreadPoolExecutor(max_workers=MAX_PAGE_WORKERS) as executor:
-            futures = {executor.submit(scrape_page, p, data): p for p in page_batch}
+            futures = {executor.submit(scrape_page, p): p for p in page_batch}
             for future in as_completed(futures):
                 new_items = future.result()
                 if new_items:
@@ -145,9 +147,7 @@ def main():
         else:
             consecutive_skips = 0
             total_new += len(all_new)
-            data.extend(all_new)
-            save_data(data)
-            print(f"Saved {len(all_new)} new wallpapers.")
+            print(f"Saved {len(all_new)} new wallpapers to MongoDB.")
 
         page += MAX_PAGE_WORKERS
 
